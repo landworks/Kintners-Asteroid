@@ -1,21 +1,22 @@
 import SpriteKit
 import GameplayKit
 
-class GameScene: SKScene, SKPhysicsContactDelegate {
+class GameScene: SKScene, SKPhysicsContactDelegate, HelpScreenProvider {
     
     // MARK: - Properties
     private(set) var player: Player?
     private var gameState: GameState = .ready
     private var level: Int = 1
     private var score: Int = 0
+    private var gameOverContainer: SKNode?
     
     private var isTouching: Bool = false
     private var touchLocation: CGPoint = CGPoint.zero
     
-    private let explosionRadius: CGFloat = 60.0
-    private let largeAsteroidSize: CGFloat = 40.0
-    private let mediumAsteroidSize: CGFloat = 25.0
-    private let smallAsteroidSize: CGFloat = 15.0
+    private var explosionRadius: CGFloat = 60.0
+    private var largeAsteroidSize: CGFloat = 40.0
+    private var mediumAsteroidSize: CGFloat = 25.0
+    private var smallAsteroidSize: CGFloat = 15.0
     
     private var asteroidsSpawned: Int = 0
     private var asteroidsDestroyed: Int = 0
@@ -26,12 +27,12 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private var isThrusting: Bool = false
     private var initialTouchX: CGFloat = 0
     private var initialTouchY: CGFloat = 0
-    private let thrustPower: CGFloat = 20.0  // Reduced from 50.0 for more gradual acceleration
+    private let thrustPower: CGFloat = 5.0  // Reduced from 20.0 for much slower acceleration
     
     private var lastTouchX: CGFloat = 0
     private var lastTouchY: CGFloat = 0
     private var currentRotation: CGFloat = 0
-    private var rotationSensitivity: CGFloat = 0.01
+    private var rotationSensitivity: CGFloat = 0.005  // Reduced from 0.01 for slower rotation
     
     private var levelLabel: SKLabelNode?
     private var currentLevel: Int = 1
@@ -65,12 +66,14 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             
             // Horizontal positions (evenly spaced)
             static let positions: [CGFloat] = [
-                0.15,   // Lives
-                0.30,   // Level
-                0.45,   // Time
-                0.60,   // Active
-                0.75,   // Score
-                0.90    // Bullets
+                0.08,   // Life
+                0.20,   // Shield
+                0.32,   // Super
+                0.44,   // Level
+                0.56,   // Time
+                0.68,   // Active
+                0.80,   // Score
+                0.92    // Bullets
             ]
         }
     }
@@ -119,6 +122,9 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         static let asteroidsPerLevel: Int = 5      // Add 5 more each level
         static let baseSpeed: CGFloat = 50.0       // Reduced from 150.0
         static let speedIncrease: CGFloat = 10.0   // Reduced from 25.0
+        static let maxForceFields: Int = 10        // Maximum force field uses
+        static let maxSuperFires: Int = 5          // Maximum super fire uses
+        static let bulletsPerLevel: Int = 200      // Bullets per level
     }
     
     // Calculate total asteroids needed for current level
@@ -161,10 +167,29 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private let rapidFireFastInterval: TimeInterval = 0.05  // Faster interval for double-tap rapid fire
     
     // Add these properties at the top
-    private let bulletsPerLevel: Int = 200
-    private var remainingBullets: Int = 200
+    private var remainingForceFields: Int = GameConstants.maxForceFields
+    private var remainingSuperFires: Int = GameConstants.maxSuperFires
     private var bulletsTitleLabel: SKLabelNode?
     private var bulletsValueLabel: SKLabelNode?
+    
+    // Add helpOverlay property at the top with other properties
+    var helpOverlay: SKNode?
+    
+    // Add touch indicator properties
+    private var touchIndicator: SKShapeNode?
+    private var directionIndicator: SKShapeNode?
+    
+    // Add new properties at the top
+    private var enterNameLabel: SKLabelNode?
+    
+    // Add property for notification observer
+    private var highScoreObserver: NSObjectProtocol?
+    
+    // Add these properties at the top with other properties
+    private var remainingBullets: Int = 0
+    private var bulletsPerLevel: Int {
+        return GameConstants.bulletsPerLevel
+    }
     
     // MARK: - Lifecycle
     override init(size: CGSize) {
@@ -187,6 +212,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         backgroundColor = .black
         gameState = .playing
         setupGame()
+        setupTouchIndicators()
     }
     
     override func update(_ currentTime: TimeInterval) {
@@ -213,6 +239,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         setupPlayer()
         currentLevel = 1
         lives = 3
+        remainingForceFields = GameConstants.maxForceFields
+        remainingSuperFires = GameConstants.maxSuperFires
         asteroidsDestroyed = 0
         currentAsteroids = 0
         setupHUD()
@@ -387,6 +415,12 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let allTouches = event?.allTouches ?? Set<UITouch>()
         let currentTime = Date().timeIntervalSince1970
         
+        // Check for help overlay first
+        if helpOverlay != nil {
+            hideHelpScreen()
+            return
+        }
+        
         // Check for three-finger touch during gameplay first
         if gameState == GameState.playing && allTouches.count >= 3 && !isSpinAttackActive {
             activateSpinAttack()
@@ -431,26 +465,37 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             
             lastTapTime = currentTime
         } else if gameState == GameState.gameOver && !isEnteringName {
-            // Check if tap is on "TAP TO RESTART" text
-            if let container = children.first(where: { $0.zPosition == 101 }),
-               let restartLabel = container.childNode(withName: "restartLabel") as? SKLabelNode {
-                let containerLocation = container.convert(touchLocation, from: self)
+            guard let touch = touches.first else { return }
+            let location = touch.location(in: self)
+            
+            if let container = children.first(where: { $0.zPosition == 91 }) {
+                let containerLocation = container.convert(location, from: self)
                 
-                let hitArea = CGRect(
-                    x: restartLabel.frame.minX - 20,
-                    y: restartLabel.frame.minY - 10,
-                    width: restartLabel.frame.width + 40,
-                    height: restartLabel.frame.height + 20
-                )
+                // Check for help button tap
+                if let helpButton = container.childNode(withName: "helpButton") as? SKLabelNode,
+                   helpButton.frame.contains(containerLocation) {
+                    showHelpScreen()
+                    return
+                }
                 
-                if hitArea.contains(containerLocation) {
-                    restartLabel.run(SKAction.sequence([
-                        SKAction.scale(to: 1.2, duration: 0.1),
-                        SKAction.scale(to: 1.0, duration: 0.1),
-                        SKAction.run { [weak self] in
-                            self?.restartGame()
-                        }
-                    ]))
+                // Check for restart button tap (existing code)
+                if let restartLabel = container.childNode(withName: "restartLabel") as? SKLabelNode {
+                    let hitArea = CGRect(
+                        x: restartLabel.frame.minX - 20,
+                        y: restartLabel.frame.minY - 10,
+                        width: restartLabel.frame.width + 40,
+                        height: restartLabel.frame.height + 20
+                    )
+                    
+                    if hitArea.contains(containerLocation) {
+                        restartLabel.run(SKAction.sequence([
+                            SKAction.scale(to: 1.2, duration: 0.1),
+                            SKAction.scale(to: 1.0, duration: 0.1),
+                            SKAction.run { [weak self] in
+                                self?.restartGame()
+                            }
+                        ]))
+                    }
                 }
             }
         }
@@ -464,9 +509,31 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let newLocation = touch.location(in: self)
         let previousLocation = touchLocation
         
-        // Only handle rotation - remove all thrust code
+        // Calculate horizontal and vertical movement
         let deltaX = newLocation.x - previousLocation.x
-        player.zRotation += deltaX * -0.01  // Smooth rotation
+        let deltaY = newLocation.y - previousLocation.y
+        
+        // Handle rotation (horizontal movement)
+        player.zRotation += deltaX * -rotationSensitivity
+        
+        // Only apply thrust for significant vertical movement (moving finger up/down)
+        if abs(deltaY) > abs(deltaX) && abs(deltaY) > 1.0 {
+            // Calculate thrust vector based on ship's rotation
+            let angle = player.zRotation + CGFloat.pi/2  // Adjust for sprite orientation
+            let thrustVector = CGVector(
+                dx: cos(angle) * thrustPower,
+                dy: sin(angle) * thrustPower
+            )
+            
+            // Apply thrust
+            player.physicsBody?.applyForce(thrustVector)
+            
+            // Show thrust visual
+            showThrustFire(active: true)
+        } else {
+            // Hide thrust visual when not moving vertically
+            showThrustFire(active: false)
+        }
         
         touchLocation = newLocation
     }
@@ -474,11 +541,13 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         isTouching = false
         stopRapidFire()
+        showThrustFire(active: false)  // Hide thrust when touch ends
     }
     
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         isTouching = false
         stopRapidFire()
+        showThrustFire(active: false)  // Hide thrust when touch cancelled
     }
     
     private func wrapPlayerPosition() {
@@ -588,38 +657,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         
         if collision == PhysicsCategory.player | PhysicsCategory.asteroid {
             if lives > 0 {
-                lives -= 1
-                updateHUD()
-                
-                if lives <= 0 {
-                    // Game over
-                    createExplosion(at: player?.position ?? CGPoint.zero, radius: explosionRadius)
-                    player?.removeFromParent()
-                    gameOver()
-                } else {
-                    // Reset player position and give temporary invulnerability
-                    if let player = player {
-                        createExplosion(at: player.position, radius: explosionRadius)
-                        player.position = CGPoint(x: frame.midX, y: frame.midY)
-                        player.physicsBody?.velocity = CGVector.zero
-                        player.zRotation = 0
-                        
-                        // Make player temporarily invulnerable
-                        player.physicsBody?.categoryBitMask = 0
-                        let blinkCount = 6
-                        let blinkDuration = 0.2
-                        let blink = SKAction.sequence([
-                            SKAction.fadeOut(withDuration: blinkDuration/2),
-                            SKAction.fadeIn(withDuration: blinkDuration/2)
-                        ])
-                        let blinkAction = SKAction.repeat(blink, count: blinkCount)
-                        
-                        // Run the blink action and restore collision after completion
-                        player.run(blinkAction) {
-                            player.physicsBody?.categoryBitMask = PhysicsCategory.player
-                        }
-                    }
-                }
+                // Call loseLife instead of duplicating the logic
+                loseLife()
             }
         } else if collision == PhysicsCategory.bullet | PhysicsCategory.asteroid {
             if let bullet = contact.bodyA.node?.name == "bullet" ? contact.bodyA.node : contact.bodyB.node,
@@ -640,27 +679,18 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         
         // Create full screen dark overlay
         let overlay = SKShapeNode(rectOf: size)
-        overlay.fillColor = SKColor.black.withAlphaComponent(0.95)
+        overlay.fillColor = .black
         overlay.strokeColor = .clear
         overlay.position = CGPoint(x: frame.midX, y: frame.midY)
-        overlay.zPosition = 100
+        overlay.zPosition = 90
         addChild(overlay)
         gameOverOverlay = overlay
         
         // Create main container for all content
         let contentNode = SKNode()
         contentNode.position = CGPoint(x: frame.midX, y: frame.midY + 50)
-        contentNode.zPosition = 101
+        contentNode.zPosition = 91
         addChild(contentNode)
-        
-        // Game Over text with hidden triple tap functionality
-        let gameOverLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
-        gameOverLabel.text = "GAME OVER"
-        gameOverLabel.fontSize = 60
-        gameOverLabel.fontColor = .white
-        gameOverLabel.position = CGPoint(x: 0, y: 250)
-        gameOverLabel.name = "gameOverLabel"
-        contentNode.addChild(gameOverLabel)
         
         // Add triple tap gesture recognizer
         let tripleTap = UITapGestureRecognizer(target: self, action: #selector(handleTripleTap(_:)))
@@ -679,9 +709,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let sceneLocation = convertPoint(fromView: location)
         
         // Convert tap location to the container's coordinate space
-        if let container = children.first(where: { $0.zPosition == 101 }),
+        if let container = children.first(where: { $0.zPosition == 91 }),
            let gameOverLabel = container.childNode(withName: "gameOverLabel") as? SKLabelNode {
-            // Convert the point to the container's coordinate space
             let containerLocation = container.convert(sceneLocation, from: self)
             
             // Check if tap is on "GAME OVER" text frame
@@ -690,19 +719,13 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
                 // Clear high scores
                 HighScoreManager.shared.clearScores()
                 
-                // Remove only the score labels
+                // Remove existing scores
                 container.enumerateChildNodes(withName: "highScore") { node, _ in
                     node.removeFromParent()
                 }
                 
-                // Add empty high scores list
-                let titleLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
-                titleLabel.text = "HIGH SCORES"
-                titleLabel.name = "highScore"
-                titleLabel.fontSize = 40
-                titleLabel.fontColor = .white
-                titleLabel.position = CGPoint(x: 0, y: 60)
-                container.addChild(titleLabel)
+                // Show empty high scores list
+                showHighScores(in: container, startingY: 100)
                 
                 // Add visual feedback
                 gameOverLabel.run(SKAction.sequence([
@@ -720,120 +743,299 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             node.removeFromParent()
         }
         // Show updated (empty) high scores
-        showHighScores(in: container, startingY: -40)
+        showHighScores(in: container, startingY: 100)
     }
     
+    // MARK: - High Score Display Methods
+    
+    /// Shows the high score entry interface when player achieves a high score
+    /// - Parameter container: The container node where high score UI will be displayed
     private func showHighScoreEntry(in container: SKNode) {
-        // Game Over text at top
+        print("\n=== Setting up High Score Entry ===")
+        
+        // Store reference to container for later updates
+        gameOverContainer = container
+        
+        // Clean up any existing observer to prevent duplicates
+        if let observer = highScoreObserver {
+            NotificationCenter.default.removeObserver(observer)
+            highScoreObserver = nil
+        }
+        
+        // Single GAME OVER at top
         let gameOverLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
         gameOverLabel.text = "GAME OVER"
-        gameOverLabel.fontSize = 60
+        gameOverLabel.fontSize = 48
         gameOverLabel.fontColor = .white
-        gameOverLabel.position = CGPoint(x: 0, y: 250)
+        gameOverLabel.position = CGPoint(x: 0, y: 100)
         gameOverLabel.name = "gameOverLabel"
         container.addChild(gameOverLabel)
         
-        // Name entry prompt right below game over
-        let promptLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
-        promptLabel.text = "ENTER YOUR NAME"
-        promptLabel.fontSize = 30
-        promptLabel.fontColor = .white
-        promptLabel.position = CGPoint(x: 0, y: 200)
-        promptLabel.name = "namePrompt"
-        container.addChild(promptLabel)
-        
-        // Create text field directly below the prompt
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+        // Create text field for name entry on main thread
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  let view = self.view,
+                  let window = view.window else { return }
+            
+            // Remove any existing text field
+            self.cleanupTextField()
+            
+            // Calculate text field position in window coordinates
+            let sceneSpacePoint = CGPoint(x: view.bounds.midX - 100,
+                                        y: view.bounds.height/2)
+            let windowSpacePoint = view.convert(sceneSpacePoint, to: window)
             
             let textField = UITextField(frame: CGRect(
-                x: self.frame.midX - 100,
-                y: self.frame.midY - 220,  // Moved higher to be just below prompt
+                x: windowSpacePoint.x,
+                y: windowSpacePoint.y,
                 width: 200,
                 height: 40
             ))
+            
             textField.backgroundColor = .white
             textField.textColor = .black
             textField.textAlignment = .center
             textField.font = UIFont(name: "AvenirNext-DemiBold", size: 20)
-            textField.placeholder = "TAP HERE"
+            textField.placeholder = "ENTER YOUR NAME"
             textField.delegate = self
             textField.returnKeyType = .done
+            textField.autocorrectionType = .no
+            textField.autocapitalizationType = .allCharacters
+            textField.spellCheckingType = .no
+            textField.smartQuotesType = .no
+            textField.smartDashesType = .no
+            textField.smartInsertDeleteType = .no
             textField.layer.cornerRadius = 6
             textField.layer.borderWidth = 2
             textField.layer.borderColor = UIColor.white.cgColor
             
-            self.view?.addSubview(textField)
-            textField.becomeFirstResponder()
+            // Add to window instead of view
+            window.addSubview(textField)
             self.nameEntryField = textField
+            
+            // Delay becoming first responder slightly to ensure proper setup
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                textField.becomeFirstResponder()
+            }
+            
             self.isEnteringName = true
+            
+            // Add "ENTER NAME FOR HIGH SCORE" label above text field
+            let enterNameLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+            enterNameLabel.text = "NAME FOR HIGH SCORE"
+            enterNameLabel.fontSize = 28
+            enterNameLabel.fontColor = .white
+            enterNameLabel.position = CGPoint(x: 0, y: 0)
+            enterNameLabel.name = "enterNameLabel"
+            container.addChild(enterNameLabel)
+            self.enterNameLabel = enterNameLabel
+            
+            // Add score lxabel
+            let scoreLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+            scoreLabel.text = "SCORE: \(asteroidsDestroyed)"
+            scoreLabel.fontSize = 32
+            scoreLabel.fontColor = .white
+            scoreLabel.position = CGPoint(x: 0, y: -150)  // Fixed position relative to container
+            container.addChild(scoreLabel)
+            
+            // Add level label
+            let levelLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+            levelLabel.text = "LEVEL: \(currentLevel)"
+            levelLabel.fontSize = 32
+            levelLabel.fontColor = .white
+            levelLabel.position = CGPoint(x: 0, y: scoreLabel.position.y - 40)  // Position below score
+            container.addChild(levelLabel)
         }
         
-        // Show high scores below
-        showHighScores(in: container, startingY: 60)
+        // Dispatch the work item
+        DispatchQueue.main.async(execute: workItem)
     }
     
-    private func showFinalScore(in container: SKNode) {
-        let finalScoreLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
-        finalScoreLabel.text = "FINAL SCORE"
-        finalScoreLabel.fontSize = 40
-        finalScoreLabel.fontColor = .white
-        finalScoreLabel.position = CGPoint(x: 0, y: 120)
-        container.addChild(finalScoreLabel)
+    /// Shows the high scores screen after game over
+    private func showHighScoresAfterGameOver() {
+        // Remove the previous game over container and create a new one
+        gameOverContainer?.removeFromParent()
         
-        let scoreValueLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
-        scoreValueLabel.text = "\(asteroidsDestroyed)"
-        scoreValueLabel.fontSize = 80
-        scoreValueLabel.fontColor = .white
-        scoreValueLabel.position = CGPoint(x: 0, y: 40)
-        container.addChild(scoreValueLabel)
+        let container = SKNode()
+        container.position = CGPoint(x: frame.midX, y: frame.midY + 50)
+        container.zPosition = 91
+        addChild(container)
+        gameOverContainer = container
         
-        // Show high scores
-        showHighScores(in: container, startingY: -40)
+        // Single HIGH SCORES label
+        let highScoresLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        highScoresLabel.text = "TOP 10 CHAMPS"
+        highScoresLabel.fontSize = 46
+        highScoresLabel.fontColor = .white
+        highScoresLabel.position = CGPoint(x: 0, y: 200)
+        container.addChild(highScoresLabel)
         
-        // Add tap to restart at bottom
+        // Show high scores table
+        showHighScores(in: container, startingY: 100)
+        
+        // Bottom buttons
         let restartLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
         restartLabel.text = "TAP TO RESTART"
-        restartLabel.fontSize = 30
+        restartLabel.fontSize = 28
         restartLabel.fontColor = .white
-        restartLabel.position = CGPoint(x: 0, y: -350)  // Moved to bottom
+        restartLabel.position = CGPoint(x: 0, y: -300)
         restartLabel.name = "restartLabel"
         container.addChild(restartLabel)
+        
+        let helpLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+        helpLabel.text = "HELP"
+        helpLabel.fontSize = 28
+        helpLabel.fontColor = .white
+        helpLabel.position = CGPoint(x: 0, y: -350)
+        helpLabel.name = "helpButton"
+        container.addChild(helpLabel)
     }
     
+    /// Shows the final score screen for non-high scores
+    private func showFinalScore(in container: SKNode) {
+        // Create a simplified version of the high scores screen
+        let gameOverLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        gameOverLabel.text = "GAME OVER"
+        gameOverLabel.fontSize = 48
+        gameOverLabel.fontColor = .white
+        gameOverLabel.position = CGPoint(x: 0, y: 200)
+        gameOverLabel.name = "gameOverLabel"
+        container.addChild(gameOverLabel)
+        
+        // Show the score
+        let scoreLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        scoreLabel.text = "FINAL SCORE: \(asteroidsDestroyed)"
+        scoreLabel.fontSize = 36
+        scoreLabel.fontColor = .white
+        scoreLabel.position = CGPoint(x: 0, y: 140)
+        container.addChild(scoreLabel)
+        
+        // Add level label
+        let levelLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        levelLabel.text = "FINAL LEVEL: \(currentLevel)"
+        levelLabel.fontSize = 36
+        levelLabel.fontColor = .white
+        levelLabel.position = CGPoint(x: 0, y: 100)  // Position below score
+        container.addChild(levelLabel)
+        
+        // Show high scores table
+        showHighScores(in: container, startingY: 50)  // Adjusted Y position to accommodate new label
+        
+        // Bottom buttons (same as high score screen)
+        let restartLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+        restartLabel.text = "TAP TO RESTART"
+        restartLabel.fontSize = 28
+        restartLabel.fontColor = .white
+        restartLabel.position = CGPoint(x: 0, y: -400)
+        restartLabel.name = "restartLabel"
+        container.addChild(restartLabel)
+        
+        let helpLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+        helpLabel.text = "HELP"
+        helpLabel.fontSize = 28
+        helpLabel.fontColor = .white
+        helpLabel.position = CGPoint(x: 0, y: -450)
+        helpLabel.name = "helpButton"
+        container.addChild(helpLabel)
+    }
+    
+    /// Displays the high score table
+    /// - Parameters:
+    ///   - container: The container node where scores will be displayed
+    ///   - startingY: The Y position to start displaying scores from
     private func showHighScores(in container: SKNode, startingY: CGFloat) {
-        let scores = HighScoreManager.shared.highScores.prefix(5)
+        print("\n=== Showing High Scores ===")
+        let scores = HighScoreManager.shared.highScores.prefix(10)
+        print("📊 Displaying \(scores.count) scores")
         
-        // High Scores header
-        let titleLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
-        titleLabel.text = "HIGH SCORES"
-        titleLabel.name = "highScore"
-        titleLabel.fontSize = 40
-        titleLabel.fontColor = .white
-        titleLabel.position = CGPoint(x: 0, y: startingY)
-        container.addChild(titleLabel)
+        // Adjust x-positions to center the table
+        let nameX: CGFloat = -180
+        let scoreX: CGFloat = -5
+        let dateX: CGFloat = 60
         
-        // Score list
+        // Column Headers
+        let columnY = startingY - 40
+        
+        let nameHeader = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        nameHeader.text = "NAME"
+        nameHeader.fontSize = 20
+        nameHeader.fontColor = .white
+        nameHeader.horizontalAlignmentMode = .left
+        nameHeader.position = CGPoint(x: nameX, y: columnY)
+        nameHeader.name = "highScore"
+        container.addChild(nameHeader)
+        
+        let scoreHeader = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        scoreHeader.text = "SCORE"
+        scoreHeader.fontSize = 20
+        scoreHeader.fontColor = .white
+        scoreHeader.horizontalAlignmentMode = .center
+        scoreHeader.position = CGPoint(x: scoreX, y: columnY)
+        scoreHeader.name = "highScore"
+        container.addChild(scoreHeader)
+        
+        let dateHeader = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        dateHeader.text = "DATE"
+        dateHeader.fontSize = 20
+        dateHeader.fontColor = .white
+        dateHeader.horizontalAlignmentMode = .left
+        dateHeader.position = CGPoint(x: dateX, y: columnY)
+        dateHeader.name = "highScore"
+        container.addChild(dateHeader)
+        
+        // Score list with table layout
         for (index, score) in scores.enumerated() {
+            let rowY = startingY - 70 - CGFloat(index * 28)
+            
+            // Name column (left-aligned)
+            let nameLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+            nameLabel.text = score.name
+            nameLabel.fontSize = 20
+            nameLabel.fontColor = .white
+            nameLabel.horizontalAlignmentMode = .left
+            nameLabel.position = CGPoint(x: nameX, y: rowY)
+            nameLabel.name = "highScore"
+            container.addChild(nameLabel)
+            
+            // Score column (center-aligned)
             let scoreLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
-            scoreLabel.text = "\(score.name): \(score.score)"
-            scoreLabel.name = "highScore"
-            scoreLabel.fontSize = 24
+            scoreLabel.text = "\(score.score)"
+            scoreLabel.fontSize = 20
             scoreLabel.fontColor = .white
-            scoreLabel.position = CGPoint(x: 0, y: startingY - 60 - CGFloat(index * 35))
+            scoreLabel.horizontalAlignmentMode = .center
+            scoreLabel.position = CGPoint(x: scoreX, y: rowY)
+            scoreLabel.name = "highScore"
             container.addChild(scoreLabel)
+            
+            // Date column (left-aligned)
+            let dateLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "MM/dd HH:mm"
+            let dateText = dateFormatter.string(from: score.date)
+            dateLabel.text = dateText
+            dateLabel.fontSize = 20
+            dateLabel.fontColor = .white
+            dateLabel.horizontalAlignmentMode = .left
+            dateLabel.position = CGPoint(x: dateX, y: rowY)
+            dateLabel.name = "highScore"
+            container.addChild(dateLabel)
         }
     }
     
     // Add restart game functionality
     private func restartGame() {
+        // Remove high score observer
+        if let observer = highScoreObserver {
+            NotificationCenter.default.removeObserver(observer)
+            highScoreObserver = nil
+        }
+        
+        // Clean up the text field first
+        cleanupTextField()
+        
         // Remove game over overlay
         gameOverOverlay?.removeFromParent()
         gameOverOverlay = nil
-        
-        // Remove name entry field if it exists
-        nameEntryField?.removeFromSuperview()
-        nameEntryField = nil
         
         // Reset all firing and power-up states
         isRapidFiring = false
@@ -875,6 +1077,44 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         updateHUD()
         
         remainingBullets = bulletsPerLevel
+    }
+    
+    // MARK: - Text Field Cleanup Methods
+    
+    /// Cleanup text field and associated resources
+    private func cleanupTextField() {
+        // Ensure we're on the main thread
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.cleanupTextField()
+            }
+            return
+        }
+        
+        // Disable interaction and mark as not entering name
+        nameEntryField?.isUserInteractionEnabled = false
+        isEnteringName = false
+        
+        // Remove the "ENTER NAME" label
+        enterNameLabel?.removeFromParent()
+        enterNameLabel = nil
+        
+        // Properly dismiss keyboard first
+        if nameEntryField?.isFirstResponder == true {
+            nameEntryField?.resignFirstResponder()
+            // Give time for keyboard to dismiss before final cleanup
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.finalizeTextFieldCleanup()
+            }
+        } else {
+            finalizeTextFieldCleanup()
+        }
+    }
+    
+    /// Final step of text field cleanup
+    private func finalizeTextFieldCleanup() {
+        nameEntryField?.removeFromSuperview()
+        nameEntryField = nil
     }
     
     // Add function to split asteroid
@@ -990,7 +1230,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         levelUpLabel.text = "Level \(currentLevel)!"
         levelUpLabel.fontSize = 40
         levelUpLabel.fontColor = .white
-        levelUpLabel.position = CGPoint(x: frame.midX, y: frame.midY)
+        levelUpLabel.position = CGPoint(x: frame.midX, y: frame.midY+100)
         addChild(levelUpLabel)
         
         // Wait a moment before starting next level
@@ -1017,12 +1257,14 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         
         // Define HUD items (title, value)
         let hudItems = [
-            ("LIVES", "\(lives)"),
-            ("LEVEL", "\(currentLevel)"),
+            ("LIFE", "\(lives)"),
+            ("SHD", "\(remainingForceFields)"),
+            ("SPR", "\(remainingSuperFires)"),
+            ("LVL", "\(currentLevel)"),
             ("TIME", String(format: "%02d:%02d", Int(gameTimer) / 60, Int(gameTimer) % 60)),
-            ("ACTIVE", "\(currentAsteroids)"),
-            ("SCORE", "\(asteroidsDestroyed)"),
-            ("BULLETS", "\(remainingBullets)")
+            ("ACT", "\(currentAsteroids)"),
+            ("SCR", "\(asteroidsDestroyed)"),
+            ("BUL", "\(remainingBullets)")
         ]
         
         // Create HUD elements
@@ -1031,7 +1273,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             
             // Create title label (smaller font)
             let titleLabel = SKLabelNode(fontNamed: "SF Pro Text")
-            titleLabel.fontSize = UI.titleFontSize  // Smaller font for titles
+            titleLabel.fontSize = UI.titleFontSize
             titleLabel.fontColor = .white
             titleLabel.text = item.0
             titleLabel.horizontalAlignmentMode = .center
@@ -1045,7 +1287,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             
             // Create value label (larger font)
             let valueLabel = SKLabelNode(fontNamed: "SF Pro Text")
-            valueLabel.fontSize = UI.valueFontSize  // Larger font for values
+            valueLabel.fontSize = UI.valueFontSize
             valueLabel.fontColor = .white
             valueLabel.text = item.1
             valueLabel.horizontalAlignmentMode = .center
@@ -1061,22 +1303,28 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     
     private func updateHUD() {
         // Update value labels
-        if let livesLabel = childNode(withName: "HUD_LIVES_value") as? SKLabelNode {
+        if let livesLabel = childNode(withName: "HUD_LIFE_value") as? SKLabelNode {
             livesLabel.text = "\(lives)"
         }
-        if let levelLabel = childNode(withName: "HUD_LEVEL_value") as? SKLabelNode {
+        if let shieldLabel = childNode(withName: "HUD_SHD_value") as? SKLabelNode {
+            shieldLabel.text = "\(remainingForceFields)"
+        }
+        if let superLabel = childNode(withName: "HUD_SPR_value") as? SKLabelNode {
+            superLabel.text = "\(remainingSuperFires)"
+        }
+        if let levelLabel = childNode(withName: "HUD_LVL_value") as? SKLabelNode {
             levelLabel.text = "\(currentLevel)"
         }
         if let timeLabel = childNode(withName: "HUD_TIME_value") as? SKLabelNode {
             timeLabel.text = String(format: "%02d:%02d", Int(gameTimer) / 60, Int(gameTimer) % 60)
         }
-        if let activeLabel = childNode(withName: "HUD_ACTIVE_value") as? SKLabelNode {
+        if let activeLabel = childNode(withName: "HUD_ACT_value") as? SKLabelNode {
             activeLabel.text = "\(currentAsteroids)"
         }
-        if let scoreLabel = childNode(withName: "HUD_SCORE_value") as? SKLabelNode {
+        if let scoreLabel = childNode(withName: "HUD_SCR_value") as? SKLabelNode {
             scoreLabel.text = "\(asteroidsDestroyed)"
         }
-        if let bulletsLabel = childNode(withName: "HUD_BULLETS_value") as? SKLabelNode {
+        if let bulletsLabel = childNode(withName: "HUD_BUL_value") as? SKLabelNode {
             bulletsLabel.text = "\(remainingBullets)"
         }
     }
@@ -1098,51 +1346,48 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     }
     
     private func activateForceField() {
-        guard let player = player, !isForceFieldActive else { 
-            print("Force field activation failed - conditions not met")
-            return 
-        }
+        guard let player = player, !isForceFieldActive, remainingForceFields > 0 else { return }
         
         print("Creating force field")
         isForceFieldActive = true
+        remainingForceFields -= 1
+        updateHUD()
         
         // Create force field visual effect
-        let forceFieldRadius: CGFloat = 50.0  // Made even larger
+        let forceFieldRadius: CGFloat = 50.0
         let forceField = SKShapeNode(circleOfRadius: forceFieldRadius)
         forceField.strokeColor = .yellow
-        forceField.lineWidth = 4.0  // Made thicker
+        forceField.lineWidth = 4.0
         forceField.position = CGPoint.zero
-        forceField.zPosition = 2  // Ensure it's above other elements
-        
-        // Add stronger glow effect
+        forceField.zPosition = 2
         forceField.fillColor = .yellow.withAlphaComponent(0.4)
+        
+        // Add physics body to force field
+        let forceFieldBody = SKPhysicsBody(circleOfRadius: forceFieldRadius)
+        forceFieldBody.isDynamic = false
+        forceFieldBody.categoryBitMask = PhysicsCategory.boundary
+        forceFieldBody.collisionBitMask = PhysicsCategory.asteroid // Only collide with asteroids
+        forceFieldBody.contactTestBitMask = PhysicsCategory.asteroid
+        forceFieldBody.restitution = 1.0 // Make asteroids bounce off
+        forceField.physicsBody = forceFieldBody
         
         // Add to player
         player.addChild(forceField)
         self.forceField = forceField
         
-        // Disable player collisions
+        // Make player immune to asteroids but NOT to force field
         player.physicsBody?.categoryBitMask = 0
+        player.physicsBody?.collisionBitMask = 0 // Prevent all collisions for player
         
-        // Add more noticeable pulse animation
+        // Add pulse animation
         let pulseAction = SKAction.sequence([
             SKAction.scale(to: 1.4, duration: 0.3),
             SKAction.scale(to: 1.0, duration: 0.3)
         ])
         forceField.run(SKAction.repeatForever(pulseAction))
         
-        // Add activation effect
-        let flash = SKAction.sequence([
-            SKAction.fadeAlpha(to: 0.8, duration: 0.1),
-            SKAction.fadeAlpha(to: 0.4, duration: 0.1)
-        ])
-        forceField.run(flash)
-        
-        print("Force field activated")
-        
         // Remove force field after 3 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            print("Deactivating force field")
             self?.deactivateForceField()
         }
     }
@@ -1162,9 +1407,11 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     
     // Add new function for spin attack
     private func activateSpinAttack() {
-        guard let player = player, !isSpinAttackActive else { return }
+        guard let player = player, !isSpinAttackActive, remainingSuperFires > 0 else { return }
         
         isSpinAttackActive = true
+        remainingSuperFires -= 1
+        updateHUD()
         print("Starting spin attack")
         
         // Create rotation action
@@ -1307,17 +1554,40 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             } else {
                 // Reset player position and give temporary invulnerability
                 if let player = player {
+                    print("Before reset - Player position: \(player.position)")
+                    print("Scene center: (\(size.width/2), \(size.height/2))")
+                    
+                    // Create explosion at current position
                     createExplosion(at: player.position, radius: explosionRadius)
-                    player.position = CGPoint(x: frame.midX, y: frame.midY)
-                    player.physicsBody?.velocity = CGVector.zero
+                    
+                    // Remove any ongoing actions first
+                    player.removeAllActions()
+                    
+                    // Force position update to center
+                    let centerPoint = CGPoint(x: size.width/2, y: size.height/2)
+                    player.position = centerPoint
+                    player.run(SKAction.move(to: centerPoint, duration: 0))
+                    
+                    print("After reset - Player position: \(player.position)")
+                    
+                    // Completely stop all movement
+                    player.physicsBody?.velocity = .zero
+                    player.physicsBody?.angularVelocity = 0
                     player.zRotation = 0
+                    
+                    // Ensure physics body is active but temporarily invulnerable
+                    player.physicsBody?.isDynamic = true
+                    player.physicsBody?.categoryBitMask = 0
+                    
+                    // Stop any ongoing thrust
+                    showThrustFire(active: false)
+                    isThrusting = false
                     
                     // Reset bullets for the current level
                     remainingBullets = bulletsPerLevel
                     updateHUD()
                     
-                    // Make player temporarily invulnerable
-                    player.physicsBody?.categoryBitMask = 0
+                    // Make player temporarily invulnerable with blinking effect
                     let blinkCount = 6
                     let blinkDuration = 0.2
                     let blink = SKAction.sequence([
@@ -1326,8 +1596,10 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
                     ])
                     let blinkAction = SKAction.repeat(blink, count: blinkCount)
                     
+                    // Run the blink action and restore collision after completion
                     player.run(blinkAction) {
                         player.physicsBody?.categoryBitMask = PhysicsCategory.player
+                        print("Final position check - Player position: \(player.position)")
                     }
                 }
             }
@@ -1349,43 +1621,68 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             }
         }
     }
+    
+    private func setupTouchIndicators() {
+        // Touch point indicator
+        let indicator = SKShapeNode(circleOfRadius: 20)
+        indicator.strokeColor = .white
+        indicator.fillColor = .white.withAlphaComponent(0.3)
+        indicator.alpha = 0
+        addChild(indicator)
+        touchIndicator = indicator
+        
+        // Direction arrow
+        let arrowPath = CGMutablePath()
+        arrowPath.move(to: CGPoint(x: 0, y: 15))
+        arrowPath.addLine(to: CGPoint(x: -5, y: 0))
+        arrowPath.addLine(to: CGPoint(x: 5, y: 0))
+        arrowPath.closeSubpath()
+        
+        let arrow = SKShapeNode(path: arrowPath)
+        arrow.strokeColor = .white
+        arrow.fillColor = .white.withAlphaComponent(0.5)
+        arrow.alpha = 0
+        addChild(arrow)
+        directionIndicator = arrow
+    }
+    
+    private func showThrustFire(active: Bool) {
+        guard let player = player else { return }
+        player.showThrust(active)
+    }
 }
 
+// MARK: - High Score Entry Handling
 extension GameScene: UITextFieldDelegate {
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        guard let name = textField.text, !name.isEmpty else { return false }
+        print("\n=== Processing High Score Entry ===")
         
-        // Save high score
+        guard let name = textField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else {
+            print("❌ No name entered, ignoring submission")
+            return false
+        }
+        
+        print("📝 Name entered: \(name), Score: \(asteroidsDestroyed)")
+        
+        // Disable further editing
+        textField.isUserInteractionEnabled = false
+        
+        // Clean up the text field immediately
+        cleanupTextField()
+        
+        // Set up observer for high score updates
+        highScoreObserver = NotificationCenter.default.addObserver(
+            forName: .highScoresDidUpdate,
+            object: nil,
+            queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                self.showHighScoresAfterGameOver()
+        }
+        
+        // Save high score and show the high scores screen
+        print("💾 Saving score to CloudKit")
         HighScoreManager.shared.addScore(name, score: asteroidsDestroyed)
-        
-        // Remove text field
-        textField.removeFromSuperview()
-        nameEntryField = nil
-        isEnteringName = false
-        
-        // Clear existing high scores and "ENTER YOUR NAME" text from view
-        enumerateChildNodes(withName: "highScore") { node, _ in
-            node.removeFromParent()
-        }
-        
-        // Remove "ENTER YOUR NAME" text
-        if let container = children.first(where: { $0.zPosition == 101 }) {
-            container.enumerateChildNodes(withName: "namePrompt") { node, _ in
-                node.removeFromParent()
-            }
-            
-            // Show updated high scores (only once)
-            showHighScores(in: container, startingY: 60)
-            
-            // Add tap to restart text at bottom
-            let restartLabel = SKLabelNode(fontNamed: "AvenirNext-Regular")
-            restartLabel.text = "TAP TO RESTART"
-            restartLabel.fontSize = 30
-            restartLabel.fontColor = .white
-            restartLabel.position = CGPoint(x: 0, y: -250)
-            restartLabel.name = "restartLabel"
-            container.addChild(restartLabel)
-        }
         
         return true
     }
