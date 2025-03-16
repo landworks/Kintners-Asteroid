@@ -2,7 +2,7 @@
 
 A modern SwiftUI implementation of the classic Asteroids arcade game for iOS devices, built using SpriteKit.
 
-![Asteroids Game](Images/gameplay.png)
+![Asteroids Game](Images/gameplay.jpg)
 
 ## Overview
 
